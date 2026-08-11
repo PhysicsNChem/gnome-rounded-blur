@@ -53,6 +53,14 @@ static const gchar *mask_glsl =
 "  cogl_color_out.rgb *= m;                                                \n"
 "  cogl_color_out.a   *= m;                                                \n";
 
+static const gchar *luminance_glsl_declarations =
+"uniform sampler2D tex;                                                     \n";
+
+static const gchar *luminance_glsl =
+"  vec4 color = texture2D(tex, cogl_tex_coord_in[0].st);                    \n"
+"  float luminance = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));          \n"
+"  cogl_color_out = vec4(luminance, luminance, luminance, 1.0);             \n";
+
 #define MIN_DOWNSCALE_SIZE 256.f
 #define MAX_RADIUS 12.f
 
@@ -84,11 +92,13 @@ struct _GbBlurEffect
 
   FramebufferData background_fb;
   FramebufferData brightness_fb;
+  FramebufferData luminance_fb;
   int brightness_uniform;
 
   FramebufferData mask_fb;
   int corner_radius_uniform;
   int mask_size_uniform;
+
 
   GbBlurMode mode;
   float downscale_factor;
@@ -180,6 +190,28 @@ create_mask_pipeline (void)
   }
 
   return cogl_pipeline_copy (mask_pipeline);
+}
+
+static CoglPipeline *
+create_luminance_pipeline (void)
+{
+  static CoglPipeline *luminance_pipeline = NULL;
+
+  if (G_UNLIKELY (luminance_pipeline == NULL))
+  {
+    CoglSnippet *snippet;
+
+    luminance_pipeline = create_base_pipeline ();
+
+    snippet = cogl_snippet_new (COGL_SNIPPET_HOOK_FRAGMENT,
+                                luminance_glsl_declarations,
+                                luminance_glsl);
+
+    cogl_pipeline_add_snippet (luminance_pipeline, snippet);
+    g_object_unref (snippet);
+  }
+
+  return cogl_pipeline_copy (luminance_pipeline);
 }
 
 static void
@@ -397,6 +429,7 @@ gb_blur_effect_set_actor (ClutterActorMeta *meta,
   clear_framebuffer_data (&self->actor_fb);
   clear_framebuffer_data (&self->background_fb);
   clear_framebuffer_data (&self->brightness_fb);
+  clear_framebuffer_data (&self->luminance_fb);
   clear_framebuffer_data (&self->mask_fb);
 
   /* we keep a back pointer here, to avoid going through the ActorMeta */
@@ -794,11 +827,13 @@ gb_blur_effect_finalize (GObject *object)
   clear_framebuffer_data (&self->actor_fb);
   clear_framebuffer_data (&self->background_fb);
   clear_framebuffer_data (&self->brightness_fb);
+  clear_framebuffer_data (&self->luminance_fb);
   clear_framebuffer_data (&self->mask_fb);
 
   g_clear_object (&self->actor_fb.pipeline);
   g_clear_object (&self->background_fb.pipeline);
   g_clear_object (&self->brightness_fb.pipeline);
+  g_clear_object (&self->luminance_fb.pipeline);
   g_clear_object (&self->mask_fb.pipeline);
 
   G_OBJECT_CLASS (gb_blur_effect_parent_class)->finalize (object);
