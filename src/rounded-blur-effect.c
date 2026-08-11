@@ -96,6 +96,7 @@ struct _GbBlurEffect
   int radius;
 
   float corner_radius;
+  float average_luminance;
 };
 
 G_DEFINE_TYPE (GbBlurEffect, gb_blur_effect, CLUTTER_TYPE_EFFECT)
@@ -106,6 +107,7 @@ enum {
   PROP_BRIGHTNESS,
   PROP_MODE,
   PROP_CORNER_RADIUS,
+  PROP_AVERAGE_LUMINANCE,
   N_PROPS
 };
 
@@ -828,6 +830,10 @@ gb_blur_effect_get_property (GObject    *object,
       g_value_set_float (value, self->corner_radius);
       break;
 
+    case PROP_AVERAGE_LUMINANCE:
+      g_value_set_float (value, self->average_luminance);
+      break;
+
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
     }
@@ -899,6 +905,8 @@ gb_blur_effect_class_init (GbBlurEffectClass *klass)
     g_param_spec_float ("corner-radius", NULL, NULL,
                         0.f, G_MAXFLOAT, 0.f,
                         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY);
+properties[PROP_AVERAGE_LUMINANCE] =
+  g_param_spec_float ("average-luminance", NULL, NULL, 0.f, 1.f, 0.5f, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
   g_object_class_install_properties (object_class, N_PROPS, properties);
 }
@@ -910,6 +918,7 @@ gb_blur_effect_init (GbBlurEffect *self)
   self->radius = 0;
   self->brightness = 1.f;
   self->corner_radius = 0.f;
+  self->average_luminance = 0.5f;
 
   self->actor_fb.pipeline = create_base_pipeline ();
   self->background_fb.pipeline = create_base_pipeline ();
@@ -1042,4 +1051,12 @@ gb_blur_effect_set_corner_radius (GbBlurEffect *self,
     clutter_effect_queue_repaint (CLUTTER_EFFECT (self));
 
   g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_CORNER_RADIUS]);
+}
+
+float
+gb_blur_effect_get_average_luminance (GbBlurEffect *self)
+{
+  g_return_val_if_fail (GB_IS_BLUR_EFFECT (self), 0.5f);
+
+  return self->average_luminance;
 }

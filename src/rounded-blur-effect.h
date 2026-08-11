@@ -55,4 +55,6 @@ float gb_blur_effect_get_corner_radius (GbBlurEffect *self);
 void gb_blur_effect_set_corner_radius (GbBlurEffect *self,
                                         float          corner_radius);
 
+float gb_blur_effect_get_average_luminance (GbBlurEffect *self); //luminance of whatever is below the blurred surface and this can't be configured
+
 G_END_DECLS
