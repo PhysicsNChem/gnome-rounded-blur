@@ -53,14 +53,13 @@ static const gchar *mask_glsl =
 "  cogl_color_out.rgb *= m;                                                \n"
 "  cogl_color_out.a   *= m;                                                \n";
 
-#define LUMINANCE_SAMPLE_GRID 16
 
 static const gchar *luminance_glsl_declarations =
 "uniform sampler2D cogl_sampler0;                                            \n";
 
 static const gchar *luminance_glsl =
 "  float luminance = 0.0;                                                     \n"
-"  for (int y = 0; y < 16; y++)                                              \n"
+"  for (int y = 0; y < 16; y++)                                              \n" //sample grid is 16px but can be changed if needed
 "    {                                                                       \n"
 "      for (int x = 0; x < 16; x++)                                          \n"
 "        {                                                                   \n"
