@@ -53,13 +53,24 @@ static const gchar *mask_glsl =
 "  cogl_color_out.rgb *= m;                                                \n"
 "  cogl_color_out.a   *= m;                                                \n";
 
+#define LUMINANCE_SAMPLE_GRID 16
+
 static const gchar *luminance_glsl_declarations =
-"uniform sampler2D tex;                                                     \n";
+"uniform sampler2D cogl_sampler0;                                            \n";
 
 static const gchar *luminance_glsl =
-"  vec4 color = texture2D(tex, cogl_tex_coord_in[0].st);                    \n"
-"  float luminance = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));          \n"
-"  cogl_color_out = vec4(luminance, luminance, luminance, 1.0);             \n";
+"  float luminance = 0.0;                                                     \n"
+"  for (int y = 0; y < 16; y++)                                              \n"
+"    {                                                                       \n"
+"      for (int x = 0; x < 16; x++)                                          \n"
+"        {                                                                   \n"
+"          vec2 uv = (vec2(float(x), float(y)) + vec2(0.5)) / 16.0;           \n"
+"          vec3 color = texture2D(cogl_sampler0, uv).rgb;                    \n"
+"          luminance += dot(color, vec3(0.2126, 0.7152, 0.0722));            \n"
+"        }                                                                   \n"
+"    }                                                                       \n"
+"  luminance /= 256.0;                                                       \n"
+"  cogl_color_out = vec4(luminance, luminance, luminance, 1.0);              \n";
 
 #define MIN_DOWNSCALE_SIZE 256.f
 #define MAX_RADIUS 12.f
@@ -91,11 +102,16 @@ struct _GbBlurEffect
   CacheFlags cache_flags;
 
   FramebufferData background_fb;
+  FramebufferData blur_fb;
   FramebufferData brightness_fb;
-  FramebufferData luminance_fb;
+
   int brightness_uniform;
 
   FramebufferData mask_fb;
+
+  FramebufferData luminance_fb;
+  CoglPipeline *luminance_pipeline;
+
   int corner_radius_uniform;
   int mask_size_uniform;
 
@@ -348,6 +364,63 @@ update_brightness_fbo (GbBlurEffect *self,
                      downscale_factor);
 }
 
+
+
+static gboolean
+update_blur_fbo (GbBlurEffect *self,
+                 unsigned int  width,
+                 unsigned int  height,
+                 float         downscale_factor)
+{
+  if (self->tex_width == width &&
+      self->tex_height == height &&
+      self->downscale_factor == downscale_factor &&
+      self->blur_fb.framebuffer)
+  {
+    return TRUE;
+  }
+
+  return update_fbo (&self->blur_fb,
+                     width,
+                     height,
+                     downscale_factor);
+}
+
+static void
+clear_framebuffer_data (FramebufferData *fb_data);
+
+static gboolean
+update_luminance_fbo (GbBlurEffect *self)
+{
+  ClutterBackend *backend = clutter_get_default_backend ();
+  CoglContext *ctx =
+    clutter_backend_get_cogl_context (backend);
+
+  if (self->luminance_fb.framebuffer)
+    return TRUE;
+
+  self->luminance_fb.texture =
+    cogl_texture_2d_new_with_size (ctx, 1, 1); //always 1x1
+
+  if (!self->luminance_fb.texture)
+    return FALSE;
+
+  self->luminance_fb.framebuffer =
+    COGL_FRAMEBUFFER (
+      cogl_offscreen_new_with_texture (
+        self->luminance_fb.texture));
+
+  if (!self->luminance_fb.framebuffer)
+  {
+    clear_framebuffer_data (&self->luminance_fb);
+    return FALSE;
+  }
+
+  setup_projection_matrix (self->luminance_fb.framebuffer, 1.f, 1.f);
+
+  return TRUE;
+}
+
 static gboolean
 update_background_fbo (GbBlurEffect *self,
                        unsigned int   width,
@@ -429,6 +502,7 @@ gb_blur_effect_set_actor (ClutterActorMeta *meta,
   clear_framebuffer_data (&self->actor_fb);
   clear_framebuffer_data (&self->background_fb);
   clear_framebuffer_data (&self->brightness_fb);
+  clear_framebuffer_data(&self->blur_fb);
   clear_framebuffer_data (&self->luminance_fb);
   clear_framebuffer_data (&self->mask_fb);
 
@@ -520,50 +594,171 @@ create_blur_nodes (GbBlurEffect    *self,
 {
   g_autoptr (ClutterPaintNode) brightness_node = NULL;
   g_autoptr (ClutterPaintNode) blur_node = NULL;
+  g_autoptr (ClutterPaintNode) blur_layer_node = NULL;
   g_autoptr (ClutterPaintNode) mask_node = NULL;
+  g_autoptr (ClutterPaintNode) mask_pipeline_node = NULL;
+  g_autoptr (ClutterPaintNode) luminance_node = NULL;
+  g_autoptr (ClutterPaintNode) luminance_pipeline_node = NULL;
   float width;
   float height;
 
   clutter_actor_get_size (self->actor, &width, &height);
 
   update_mask_uniforms (self, width, height);
-  mask_node = clutter_layer_node_new_to_framebuffer (self->mask_fb.framebuffer,
-                                                     self->mask_fb.pipeline);
-  clutter_paint_node_set_static_name (mask_node, "ShellBlurEffect (mask)");
-  clutter_paint_node_add_child (node, mask_node);
-  clutter_paint_node_add_rectangle (mask_node,
-                                    &(ClutterActorBox) {
-                                      0.f, 0.f,
-                                      width, height,
-                                    });
 
-  update_brightness (self, paint_opacity);
-  brightness_node = clutter_layer_node_new_to_framebuffer (self->brightness_fb.framebuffer,
-                                                           self->brightness_fb.pipeline);
-  clutter_paint_node_set_static_name (brightness_node, "ShellBlurEffect (brightness)");
-  clutter_paint_node_add_child (mask_node, brightness_node);
-  clutter_paint_node_add_rectangle (brightness_node,
-                                    &(ClutterActorBox) {
-                                      0.f, 0.f,
-                                      cogl_texture_get_width (self->mask_fb.texture),
-                                      cogl_texture_get_height (self->mask_fb.texture),
-                                    });
 
-  blur_node = clutter_blur_node_new (self->tex_width / self->downscale_factor,
-                                     self->tex_height / self->downscale_factor,
-                                     self->radius / self->downscale_factor);
-  clutter_paint_node_set_static_name (blur_node, "ShellBlurEffect (blur)");
-  clutter_paint_node_add_child (brightness_node, blur_node);
-  clutter_paint_node_add_rectangle (blur_node,
-                                    &(ClutterActorBox) {
-                                      0.f, 0.f,
-                                      cogl_texture_get_width (self->mask_fb.texture),
-                                      cogl_texture_get_height (self->mask_fb.texture),
-                                    });
+// Final masked framebuffer.  Everything below this node eventually gets rendered into mask_fb.
 
-  self->cache_flags |= BLUR_APPLIED;
+mask_node =
+  clutter_layer_node_new_to_framebuffer (self->mask_fb.framebuffer,
+                                         self->mask_fb.pipeline);
 
-  return g_steal_pointer (&blur_node);
+clutter_paint_node_set_static_name (mask_node,
+                                    "ShellBlurEffect (mask)");
+
+clutter_paint_node_add_child (node, mask_node);
+
+clutter_paint_node_add_rectangle (
+  mask_node,
+  &(ClutterActorBox) {
+    0.f, 0.f,
+    width, height,
+  });
+
+
+blur_layer_node =
+  clutter_layer_node_new_to_framebuffer (self->blur_fb.framebuffer,
+                                         self->blur_fb.pipeline);
+
+clutter_paint_node_set_static_name (
+  blur_layer_node,
+  "ShellBlurEffect (blur framebuffer)");
+
+clutter_paint_node_add_child (mask_node, blur_layer_node);
+
+clutter_paint_node_add_rectangle (
+  blur_layer_node,
+  &(ClutterActorBox) {
+    0.f, 0.f,
+    cogl_texture_get_width (self->blur_fb.texture),
+    cogl_texture_get_height (self->blur_fb.texture),
+  });
+
+
+update_brightness (self, paint_opacity);
+
+brightness_node =
+  clutter_layer_node_new_to_framebuffer (
+    self->brightness_fb.framebuffer,
+    self->brightness_fb.pipeline);
+
+clutter_paint_node_set_static_name (
+  brightness_node,
+  "ShellBlurEffect (brightness)");
+
+clutter_paint_node_add_child (blur_layer_node, brightness_node);
+
+clutter_paint_node_add_rectangle (
+  brightness_node,
+  &(ClutterActorBox) {
+    0.f, 0.f,
+    cogl_texture_get_width (self->brightness_fb.texture),
+    cogl_texture_get_height (self->brightness_fb.texture),
+  });
+
+
+blur_node =
+  clutter_blur_node_new (
+    self->tex_width / self->downscale_factor,
+    self->tex_height / self->downscale_factor,
+    self->radius / self->downscale_factor);
+
+clutter_paint_node_set_static_name (
+  blur_node,
+  "ShellBlurEffect (blur)");
+
+clutter_paint_node_add_child (brightness_node, blur_node);
+
+clutter_paint_node_add_rectangle (
+  blur_node,
+  &(ClutterActorBox) {
+    0.f, 0.f,
+    cogl_texture_get_width (self->brightness_fb.texture),
+    cogl_texture_get_height (self->brightness_fb.texture),
+  });
+
+/*
+  Copy the post-blur texture into the final mask framebuffer.
+  mask_fb.pipeline contains the rounded-corner mask shader.
+ */
+mask_pipeline_node =
+  clutter_pipeline_node_new (self->mask_fb.pipeline);
+
+clutter_paint_node_set_static_name (
+  mask_pipeline_node,
+  "ShellBlurEffect (masked output)");
+
+clutter_paint_node_add_child (mask_node, mask_pipeline_node);
+
+clutter_paint_node_add_rectangle (
+  mask_pipeline_node,
+  &(ClutterActorBox) {
+    0.f, 0.f,
+    cogl_texture_get_width (self->blur_fb.texture),
+    cogl_texture_get_height (self->blur_fb.texture),
+  });
+
+
+//Luminance framebuffer-This is deliberately separate from mask_fb. We want luminance calculated from the blurred image, not from the rounded/masked image.
+
+luminance_node =
+  clutter_layer_node_new_to_framebuffer (
+    self->luminance_fb.framebuffer,
+    self->luminance_fb.pipeline);
+
+clutter_paint_node_set_static_name (
+  luminance_node,
+  "ShellBlurEffect (luminance)");
+
+clutter_paint_node_add_child (node, luminance_node);
+
+clutter_paint_node_add_rectangle (
+  luminance_node,
+  &(ClutterActorBox) {
+    0.f, 0.f,
+    1.f, 1.f,
+  });
+
+/*
+ * The luminance shader samples blur_fb.texture and reduces it to
+ * one luminance value.
+ */
+cogl_pipeline_set_layer_texture (
+  self->luminance_pipeline,
+  0,
+  self->blur_fb.texture);
+
+luminance_pipeline_node =
+  clutter_pipeline_node_new (self->luminance_pipeline);
+
+clutter_paint_node_set_static_name (
+  luminance_pipeline_node,
+  "ShellBlurEffect (luminance sample)");
+
+clutter_paint_node_add_child (
+  luminance_node,
+  luminance_pipeline_node);
+
+clutter_paint_node_add_rectangle (
+  luminance_pipeline_node,
+  &(ClutterActorBox) {
+    0.f, 0.f,
+    1.f, 1.f,
+  });
+
+self->cache_flags |= BLUR_APPLIED;
+
+return g_steal_pointer (&blur_node);
 }
 
 static void
@@ -629,7 +824,9 @@ update_framebuffers (GbBlurEffect       *self,
 
   updated = update_actor_fbo (self, width, height, downscale_factor) &&
             update_brightness_fbo (self, width, height, downscale_factor) &&
-            update_mask_fbo (self, width, height, downscale_factor);
+            update_blur_fbo (self, width, height, downscale_factor) &&
+            update_mask_fbo (self, width, height, downscale_factor) &&
+            update_luminance_fbo (self);
 
   if (self->mode == GB_BLUR_MODE_BACKGROUND)
     updated = updated && update_background_fbo (self, width, height);
@@ -736,6 +933,35 @@ needs_repaint (GbBlurEffect         *self,
 }
 
 static void
+update_average_luminance (GbBlurEffect *self)
+{
+  uint8_t pixel[4];
+  float luminance;
+
+  if (!self->luminance_fb.framebuffer)
+    return;
+
+  if (!cogl_framebuffer_read_pixels (
+        self->luminance_fb.framebuffer,
+        0, 0,
+        1, 1,
+        COGL_PIXEL_FORMAT_RGBA_8888,
+        pixel))
+    return;
+
+  luminance = pixel[0] / 255.f;
+
+  if (fabsf (self->average_luminance - luminance) < 0.001f)
+    return;
+
+  self->average_luminance = luminance;
+
+  g_object_notify_by_pspec (
+    G_OBJECT (self),
+    properties[PROP_AVERAGE_LUMINANCE]);
+}
+
+static void
 gb_blur_effect_paint_node (ClutterEffect           *effect,
                               ClutterPaintNode        *node,
                               ClutterPaintContext     *paint_context,
@@ -768,6 +994,8 @@ gb_blur_effect_paint_node (ClutterEffect           *effect,
       if (needs_repaint (self, flags))
         {
           ClutterActorBox source_actor_box;
+
+          update_average_luminance(self);
 
           update_actor_box (self, paint_context, &source_actor_box);
 
@@ -826,14 +1054,17 @@ gb_blur_effect_finalize (GObject *object)
 
   clear_framebuffer_data (&self->actor_fb);
   clear_framebuffer_data (&self->background_fb);
+  clear_framebuffer_data (&self->blur_fb);
   clear_framebuffer_data (&self->brightness_fb);
   clear_framebuffer_data (&self->luminance_fb);
   clear_framebuffer_data (&self->mask_fb);
 
   g_clear_object (&self->actor_fb.pipeline);
   g_clear_object (&self->background_fb.pipeline);
+  g_clear_object(&self->blur_fb.pipeline);
   g_clear_object (&self->brightness_fb.pipeline);
   g_clear_object (&self->luminance_fb.pipeline);
+  g_clear_object (&self->luminance_pipeline);
   g_clear_object (&self->mask_fb.pipeline);
 
   G_OBJECT_CLASS (gb_blur_effect_parent_class)->finalize (object);
@@ -958,7 +1189,10 @@ gb_blur_effect_init (GbBlurEffect *self)
   self->actor_fb.pipeline = create_base_pipeline ();
   self->background_fb.pipeline = create_base_pipeline ();
   self->brightness_fb.pipeline = create_brightness_pipeline ();
+  self->blur_fb.pipeline = create_base_pipeline ();
   self->mask_fb.pipeline = create_mask_pipeline ();
+  self->luminance_fb.pipeline = create_base_pipeline ();
+  self->luminance_pipeline = create_luminance_pipeline ();
   self->brightness_uniform =
     cogl_pipeline_get_uniform_location (self->brightness_fb.pipeline, "brightness");
   self->corner_radius_uniform =
